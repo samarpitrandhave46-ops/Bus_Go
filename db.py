@@ -4,8 +4,9 @@ from datetime import datetime, date
 import pandas as pd
 from config import get_setting
 
+APP_ENV = get_setting("BUSGO_ENV", "development").strip().lower()
 DB = get_setting("BUSGO_SQLITE_PATH", os.path.join(os.path.dirname(__file__), "busgo.db"))
-DB_ENGINE = get_setting("BUSGO_DB_ENGINE", "sqlite").strip().lower()
+DB_ENGINE = get_setting("BUSGO_DB_ENGINE", "mysql" if APP_ENV == "production" else "sqlite").strip().lower()
 TAX, FEE = 0.05, 20.0
 PROMOS = {"BUSGO10": 0.10, "WELCOME50": 0.05}
 
@@ -88,6 +89,8 @@ def check_pw(pw, stored):
 
 
 def init():
+    if APP_ENV == "production" and DB_ENGINE != "mysql":
+        raise RuntimeError("Production requires BUSGO_DB_ENGINE=mysql; SQLite is development-only.")
     if DB_ENGINE == "mysql":
         statements = [
             """CREATE TABLE IF NOT EXISTS users(id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -208,14 +211,6 @@ def login(email, pw):
     return dict(u) if u and check_pw(pw, u["password"]) else None
 
 
-def reset_password(email, phone, new_pw):
-    u = q("SELECT * FROM users WHERE email=? AND phone=?", (email.lower(), phone), one=True)
-    if not u:
-        return False
-    q("UPDATE users SET password=? WHERE id=?", (hash_pw(new_pw), u["id"]), commit=True)
-    return True
-
-
 def update_profile(uid, name, phone):
     q("UPDATE users SET name=?, phone=? WHERE id=?", (name, phone, uid), commit=True)
 
@@ -327,34 +322,55 @@ def complete_payment(bid, link_id, payment_id, method):
             with c.cursor() as cur:
                 cur.execute(_sql("SELECT * FROM payment_attempts WHERE booking_id=? FOR UPDATE"), (bid,))
                 attempt = cur.fetchone()
-                cur.execute(_sql("SELECT status FROM bookings WHERE id=? FOR UPDATE"), (bid,))
+                cur.execute(_sql("SELECT status,bus_id,journey_date,seats FROM bookings WHERE id=? FOR UPDATE"), (bid,))
                 booking = cur.fetchone()
         else:
             c.execute("BEGIN IMMEDIATE")
             attempt = c.execute("SELECT * FROM payment_attempts WHERE booking_id=?", (bid,)).fetchone()
-            booking = c.execute("SELECT status FROM bookings WHERE id=?", (bid,)).fetchone()
+            booking = c.execute("SELECT status,bus_id,journey_date,seats FROM bookings WHERE id=?", (bid,)).fetchone()
         if not attempt or not booking or attempt["provider_link_id"] != link_id:
             c.rollback()
-            return False
+            return "invalid"
         if booking["status"] == "Confirmed":
             c.rollback()
-            return attempt["provider_payment_id"] == payment_id
+            return "confirmed" if attempt["provider_payment_id"] == payment_id else "invalid"
+        if booking["status"] == "Payment Review":
+            c.rollback()
+            return "review" if attempt["provider_payment_id"] == payment_id else "invalid"
         if booking["status"] != "Pending":
             c.rollback()
-            return False
+            return "invalid"
+
         if DB_ENGINE == "mysql":
             with c.cursor() as cur:
-                cur.execute(_sql("UPDATE payment_attempts SET provider_payment_id=?,paid_at=?,status='Paid' WHERE booking_id=?"),
-                            (payment_id, datetime.now().isoformat(), bid))
-                cur.execute(_sql("UPDATE bookings SET pay_method=?,pay_status='Paid',status='Confirmed' WHERE id=?"),
-                            (method, bid))
+                cur.execute(_sql("SELECT id FROM buses WHERE id=? FOR UPDATE"), (booking["bus_id"],))
+                cur.execute(_sql("""SELECT seats FROM bookings WHERE bus_id=? AND journey_date=?
+                                   AND status='Confirmed' AND id<>? FOR UPDATE"""),
+                            (booking["bus_id"], booking["journey_date"], bid))
+                confirmed = cur.fetchall()
         else:
-            c.execute("UPDATE payment_attempts SET provider_payment_id=?,paid_at=?,status='Paid' WHERE booking_id=?",
-                      (payment_id, datetime.now().isoformat(), bid))
-            c.execute("UPDATE bookings SET pay_method=?,pay_status='Paid',status='Confirmed' WHERE id=?",
-                      (method, bid))
+            confirmed = c.execute("""SELECT seats FROM bookings WHERE bus_id=? AND journey_date=?
+                                    AND status='Confirmed' AND id<>?""",
+                                  (booking["bus_id"], booking["journey_date"], bid)).fetchall()
+        requested_seats = set(json.loads(booking["seats"]))
+        has_conflict = any(requested_seats & set(json.loads(row["seats"])) for row in confirmed)
+        booking_status = "Payment Review" if has_conflict else "Confirmed"
+        payment_status = "Paid - Review" if has_conflict else "Paid"
+        attempt_status = "Review" if has_conflict else "Paid"
+
+        if DB_ENGINE == "mysql":
+            with c.cursor() as cur:
+                cur.execute(_sql("UPDATE payment_attempts SET provider_payment_id=?,paid_at=?,status=? WHERE booking_id=?"),
+                            (payment_id, datetime.now().isoformat(), attempt_status, bid))
+                cur.execute(_sql("UPDATE bookings SET pay_method=?,pay_status=?,status=? WHERE id=?"),
+                            (method, payment_status, booking_status, bid))
+        else:
+            c.execute("UPDATE payment_attempts SET provider_payment_id=?,paid_at=?,status=? WHERE booking_id=?",
+                      (payment_id, datetime.now().isoformat(), attempt_status, bid))
+            c.execute("UPDATE bookings SET pay_method=?,pay_status=?,status=? WHERE id=?",
+                      (method, payment_status, booking_status, bid))
         c.commit()
-        return True
+        return "review" if has_conflict else "confirmed"
     except Exception:
         c.rollback()
         raise
@@ -419,6 +435,8 @@ def cancel_booking(bid):
 def group(b):
     if b["status"] == "Cancelled":
         return "Cancelled"
+    if b["status"] == "Payment Review":
+        return "Payment Review"
     if b["status"] == "Pending":
         return "Pending" if b.get("expires_at", 0) > time.time() else "Cancelled"
     return "Upcoming" if b["journey_date"] >= str(date.today()) else "Completed"

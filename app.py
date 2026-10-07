@@ -48,7 +48,7 @@ def money(x):
 # ================= AUTH =================
 def auth_page():
     st.markdown('<div class="hero"><h2>🚌 BusGo</h2><p>Book bus tickets in seconds.</p></div>', unsafe_allow_html=True)
-    t1, t2, t3 = st.tabs(["Login", "Create account", "Forgot password"])
+    t1, t2, t3 = st.tabs(["Login", "Create account", "Password help"])
     with t1:
         with st.form("login"):
             email = st.text_input("Email")
@@ -58,8 +58,6 @@ def auth_page():
                 if u:
                     S.user = u; S.page = "admin" if u["role"] == "admin" else "home"; st.rerun()
                 st.error("Invalid email or password.")
-        if db.DB_ENGINE == "sqlite":
-            st.caption("Demo → user@busgo.com / user123 · admin@busgo.com / admin123")
         st.button("Continue with Google", disabled=True, help="Needs OAuth setup (st.login) – see notes.")
     with t2:
         with st.form("reg"):
@@ -78,13 +76,7 @@ def auth_page():
                     ok, msg = db.register(name.strip(), email, phone, p1)
                     (st.success if ok else st.error)(msg)
     with t3:
-        with st.form("fp"):
-            e = st.text_input("Registered email", key="fe")
-            ph = st.text_input("Registered mobile", key="fph")
-            npw = st.text_input("New password", type="password", key="fnp")
-            if st.form_submit_button("Reset password"):
-                if len(npw) >= 6 and db.reset_password(e, ph, npw): st.success("Password updated.")
-                else: st.error("Details don't match or password too short.")
+        st.info("Password recovery requires identity verification. Contact your BusGo administrator for help.")
 
 
 # ================= USER PAGES =================
@@ -388,13 +380,7 @@ def show_ticket(bid, key=""):
 
 def confirm():
     if not S.booking: return go("home")
-    booking = db.get_booking(S.booking)
-    if booking and booking["pay_status"] == "Demo Paid":
-        st.warning("Demo booking only. No payment was charged and this is not a valid travel ticket.")
-    st.markdown('<div class="ok">✅</div>', unsafe_allow_html=True)
-    heading = "Demo Booking Preview" if booking and booking["pay_status"] == "Demo Paid" else "Booking Confirmed"
-    st.markdown(f"<h2 style='text-align:center'>{heading}</h2>", unsafe_allow_html=True)
-    st.balloons() if not S.get("_b") else None; S["_b"] = True
+    st.subheader("Booking details")
     show_ticket(S.booking, "c")
     a, b = st.columns(2)
     if a.button("View Booking", use_container_width=True): S._b = False; go("bookings")
@@ -404,8 +390,8 @@ def confirm():
 def bookings():
     st.subheader("My Bookings")
     allb = db.bookings_of(S.user["id"])
-    tabs = st.tabs(["Upcoming", "Payment pending", "Completed", "Cancelled"])
-    for tab, name in zip(tabs, ["Upcoming", "Pending", "Completed", "Cancelled"]):
+    tabs = st.tabs(["Upcoming", "Payment pending", "Payment review", "Completed", "Cancelled"])
+    for tab, name in zip(tabs, ["Upcoming", "Pending", "Payment Review", "Completed", "Cancelled"]):
         with tab:
             items = [b for b in allb if db.group(b) == name]
             if not items: st.info("No payment pending bookings." if name == "Pending" else f"No {name.lower()} bookings.")
@@ -422,6 +408,8 @@ def bookings():
                             c1.link_button("Complete payment", b["checkout_url"])
                         else:
                             c1.caption("Checkout expired. Start a new booking.")
+                    if name == "Payment Review":
+                        c1.caption("Payment captured; support review is required. No ticket was issued.")
                     if name == "Upcoming" and c2.button("Cancel Booking", key=f"cb{b['id']}"): S.cancel = b["id"]
                     if S.get(f"show{b['id']}"): show_ticket(b["id"], "l")
     if S.get("cancel"):
@@ -545,33 +533,46 @@ def process_payment_callback():
     try:
         callback = payment_gateway.verify_callback(st.query_params)
         if not callback:
-            S.payment_notice = (False, "Payment verification failed. No ticket was issued.")
+            S.payment_notice = ("error", "Payment verification failed. No ticket was issued.")
         else:
             attempt = db.payment_attempt(callback["booking_id"])
             booking = db.get_booking(callback["booking_id"])
             if not attempt or not booking or attempt["provider_link_id"] != callback["link_id"]:
-                S.payment_notice = (False, "This payment does not match a BusGo checkout.")
+                S.payment_notice = ("error", "This payment does not match a BusGo checkout.")
             else:
                 verified = payment_gateway.verify_paid_payment(st.query_params, booking["total"])
-                if not verified or not db.complete_payment(
-                    callback["booking_id"], callback["link_id"], callback["payment_id"], verified["method"]
-                ):
-                    S.payment_notice = (False, "Payment could not be verified. No ticket was issued.")
+                if not verified:
+                    S.payment_notice = ("error", "Payment could not be verified. No ticket was issued.")
                 else:
-                    S.payment_notice = (True, "Payment verified. Your ticket and receipt are ready in My Bookings.")
-                    if S.user and S.user["id"] == booking["user_id"]:
-                        S.booking = callback["booking_id"]
-                        S.pending_checkout = None
-                        S.page = "confirm"
+                    settlement = db.complete_payment(
+                        callback["booking_id"], callback["link_id"], callback["payment_id"], verified["method"]
+                    )
+                    if settlement == "confirmed":
+                        S.payment_notice = ("success", "Payment verified. Your ticket and receipt are ready in My Bookings.")
+                        if S.user and S.user["id"] == booking["user_id"]:
+                            S.booking = callback["booking_id"]
+                            S.pending_checkout = None
+                            S.page = "confirm"
+                    elif settlement == "review":
+                        S.payment_notice = (
+                            "warning",
+                            "Payment was captured, but the seat is no longer available. Support review is required; no ticket was issued.",
+                        )
+                        if S.user and S.user["id"] == booking["user_id"]:
+                            S.pending_checkout = None
+                            S.page = "bookings"
+                    else:
+                        S.payment_notice = ("error", "Payment could not be applied to this booking. No ticket was issued.")
     except payment_gateway.PaymentGatewayError as exc:
-        S.payment_notice = (False, str(exc))
+        S.payment_notice = ("error", str(exc))
     finally:
         st.query_params.clear()
 
 
 process_payment_callback()
 if S.payment_notice:
-    (st.success if S.payment_notice[0] else st.error)(S.payment_notice[1])
+    display_notice = {"success": st.success, "warning": st.warning, "error": st.error}
+    display_notice.get(S.payment_notice[0], st.error)(S.payment_notice[1])
     S.payment_notice = None
 
 if not S.user:

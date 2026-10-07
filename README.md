@@ -36,7 +36,7 @@ RAZORPAY_KEY_ID = "your-razorpay-key-id"
 RAZORPAY_KEY_SECRET = "your-razorpay-key-secret"
 ```
 
-The MySQL server must accept connections from the deployed app. Restrict access to the narrowest network range supported by your database host; do not expose MySQL to the entire internet. Confirm the existing `users` schema and password format before deploying because BusGo does not migrate existing tables. Add real route and bus inventory in the Admin panel after the first admin login. Use Razorpay test credentials first, then switch to approved live credentials. Streamlit Community Cloud may sleep inactive apps, so MySQL (not the app filesystem) must remain the durable store.
+The MySQL server must accept connections from the deployed app. Restrict access to the narrowest network range supported by your database host; do not expose MySQL to the entire internet. Confirm the existing `users` schema and password format before deploying because BusGo does not migrate existing tables. Add real route and bus inventory in the Admin panel after the first admin login. Use Razorpay test credentials first, then switch to approved live credentials. Streamlit Community Cloud may sleep inactive apps, so MySQL (not the app filesystem) must remain the durable store. In production, `BUSGO_ENV=production` requires MySQL; the app will not silently fall back to seeded SQLite.
 
 ## Use MySQL
 
@@ -68,4 +68,4 @@ BusGo creates a Razorpay Payment Link for each checkout. Customers enter card or
 
 When Razorpay keys are absent, local SQLite development shows a temporary simulated payment form for UI previews. It creates a clearly marked demo booking/receipt, charges nothing, and is disabled in production and MySQL mode. Never enter real payment details in the demo form.
 
-Cancellation currently marks paid bookings as `Refund required`; it does not initiate a refund. Configure and implement refunds before promising automatic refunds. Google sign-in, email/SMS notifications, and saved passenger profiles are not integrated. Use HTTPS, keep credentials in the hosting platform's secret store, restrict database network access, and configure backups and monitoring before launch.
+The current settlement path depends on the customer returning through Razorpay's browser callback; there is no webhook/reconciliation worker yet. A paid callback that arrives after its seat has been resold enters `Payment Review` and does not issue a ticket. Configure a signed Razorpay webhook and support/refund handling before live bookings. Cancellation marks paid bookings as `Refund required`; it does not initiate a refund. Self-service password recovery is disabled until an identity-verified recovery channel is configured. Google sign-in, email/SMS notifications, and saved passenger profiles are not integrated. Use HTTPS, keep credentials in the hosting platform's secret store, restrict database network access, and configure backups and monitoring before launch.
