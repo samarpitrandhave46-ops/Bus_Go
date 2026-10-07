@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+busgo.db
+.env
+.env.*
+.streamlit/secrets.toml
